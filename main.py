@@ -1,5 +1,8 @@
 import cv2
+from skimage import measure
+from mayavi import mlab
 import numpy as np
+import meshio
 import os
 from math import pi, cos, sin, inf
 
@@ -208,6 +211,65 @@ def reconstruct_top_circle(image, prosthetic, index):
     fixed = cv2.add(copy.copy(), prosthetic.copy())
     return image, prosthetic, fixed
 
+def preprocess(image_path):
+    """
+    Realiza o pré-processamento da imagem.
+
+    :param image_path: Caminho da imagem.  
+    :return: Imagem pré-processada.  
+    """
+    # image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    image = image_path
+    
+    # Aplicar filtro de suavização para reduzir o ruído
+    image_smoothed = cv2.GaussianBlur(image, (5, 5), 0)
+    
+    # Aplicar limiarização para segmentar os ossos
+    _, image_thresholded = cv2.threshold(image_smoothed, 150, 255, cv2.THRESH_BINARY)
+    
+    # Realizar operações morfológicas para remover ruídos e preencher lacunas
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    image_closed = cv2.morphologyEx(image_thresholded, cv2.MORPH_CLOSE, kernel)
+    
+    # Remover objetos indesejados através da abertura
+    image_opened = cv2.morphologyEx(image_closed, cv2.MORPH_OPEN, kernel)
+    
+    # Realizar correção de intensidade usando equalização de histograma
+    image_equalized = cv2.equalizeHist(image_opened)
+    
+    return image_equalized
+
+def reconstruct_3d_model(slices, thresh= 0.5, spacing=(1.0, 1.0, 1.0)):
+    """
+    Faz a reconstrução do modelo 3D a partir de uma lista de imagens
+
+    slices = Lista de imagens
+    thresh = Valor de limiar para segmentação
+    spacing = Espaçamento entre os pixels (M, N, P)
+    """
+    volume = np.stack(slices, axis=0)
+
+    segmented = volume > thresh
+
+    # Extrai a superfície da região segmentada
+    verts, faces, _, _ = measure.marching_cubes(segmented, spacing=spacing, method="lorensen")
+
+    # Cria um objeto para os pontos do modelo 3D
+    fig = mlab.figure(bgcolor=(1, 1, 1), size=(800, 600))
+
+    # Melhora a qualidade da superfície
+    glyphs = mlab.triangular_mesh(verts[:, 0], verts[:, 1], verts[:, 2], faces)
+    glyphs.actor.property.interpolation = 'phong'
+    glyphs.actor.property.backface_culling = True
+
+    # Atualiza a figura com o novo objeto
+    fig = mlab.gcf()
+
+    mlab.view(azimuth=45, elevation=30)
+    mlab.show()
+
+    # Retorna os pontos e as faces do modelo 3D
+    return fig.children[0].mlab_source.points, fig.children[0].mlab_source.triangles
 
 def main():
     files = [f"assets/{file}" for file in os.listdir("assets")]
@@ -218,6 +280,8 @@ def main():
 
     start_image = 2 #2
     end_image = 22 #22
+
+    prosthetic_slice = []
     for index, image in enumerate(images[start_image:end_image]):
         index += start_image
 
@@ -237,5 +301,28 @@ def main():
         cv2.imwrite(f"output/slice_{pretty_index}.png", result)
         cv2.imwrite(f"prosthetic/slice_{pretty_index}.png", prosthetic)
 
+    # Cria os slices do crânio
+    skull_slices = []
+    for path in files:
+        image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        image = preprocess(image[30:542, 112:594])
+        skull_slices.append(image)
+
+    # Cria os slices da prótese
+    prosthetic_slice = []
+    for path in os.listdir("prosthetic"):
+        image = cv2.imread(f"prosthetic/{path}", cv2.IMREAD_GRAYSCALE)
+        image = preprocess(image)
+        prosthetic_slice.append(image)
+
+    # Reconstrói o modelo 3D do crânio e da prótese
+    skull_verts, skull_faces = reconstruct_3d_model(skull_slices, spacing=(2.0, 1.0, 1.0))
+    prosthetic_verts, prosthetic_faces = reconstruct_3d_model(prosthetic_slice, spacing=(2.0, 1.0, 1.0))
+    
+    # Salva os modelos 3D em arquivos STL
+    meshio.write_points_cells("model/model.stl", skull_verts, {"triangle": skull_faces})
+    meshio.write_points_cells("model/prosthetic.stl", prosthetic_verts, {"triangle": prosthetic_faces})
+
+ 
 if __name__ == "__main__":
     main()
